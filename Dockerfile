@@ -2,10 +2,8 @@ FROM node:slim
 
 WORKDIR /app
 
-COPY ./package*.json ./
-RUN npm install
 COPY ./ ./
-RUN npm run build
+RUN npm install && npm run build
 
 ENV TOKEN= PORT=3000
 
