@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto'
 import { WebSocket } from 'ws'
 import axios from 'axios'
 import { config } from 'process'
+import { XMLHttpRequest } from 'xmlhttprequest'
 
 export const FORMAT_CONTENT_TYPE = new Map([
   ['raw-16khz-16bit-mono-pcm', 'audio/basic'],
@@ -42,11 +43,15 @@ interface PromiseExecutor {
 
 export class Service {
   private ws: WebSocket | null = null
+  private author: string = ""
+  private initFirst: boolean = false
+  private httpRequestAuthor: XMLHttpRequest | null = null
 
   private executorMap: Map<string, PromiseExecutor>
   private bufferMap: Map<string, Buffer>
 
   private heartbeatTimer: NodeJS.Timer | null = null
+  private updateAuthorTimer: NodeJS.Timer | null = null
   constructor() {
     this.executorMap = new Map()
     this.bufferMap = new Map()
@@ -87,9 +92,14 @@ export class Service {
       ws.on('close', (code, reason) => {
         // 服务器会自动断开空闲的连接
         this.ws = null
+        this.initFirst = false
         if (this.heartbeatTimer) {
           clearTimeout(this.heartbeatTimer)
           this.heartbeatTimer = null
+        }
+        if (this.updateAuthorTimer) {
+          clearTimeout(this.updateAuthorTimer)
+          this.updateAuthorTimer = null
         }
         for (let [key, value] of this.executorMap) {
           value.reject(`连接已关闭: ${reason} ${code}`)
@@ -166,6 +176,14 @@ export class Service {
   public async convert(ssml: string, format: string) {
     if (this.ws == null || this.ws.readyState != WebSocket.OPEN) {
       console.info('准备连接服务器……')
+      // 设置定时器，每9分钟，更新一次授权码。
+      if (!this.initFirst) {
+        await this.getAuthor()
+        this.updateAuthorTimer = setInterval(() => {
+          this.getAuthor()
+        }, 60000 * 9)
+        this.initFirst = true
+      }
       let connection = await this.connect()
       this.ws = connection
       console.info('连接成功！')
@@ -208,7 +226,10 @@ export class Service {
           `X-Timestamp:${Date()}\r\n` +
           `X-RequestId:${requestId}\r\n` +
           `Content-Type:application/ssml+xml\r\n` +
-          `Path:ssml\r\n\r\n` +
+          `Path:ssml\r\n` +
+          `Content-Length: 199\r\n` +
+          `Connection: Keep-Alive\r\n` +
+          `Authorization: Bearer ${this.author}\r\n\r\n` +
           ssml
         console.debug(`准备发送SSML消息：${requestId}\n`, ssmlMessage)
         this.ws.send(ssmlMessage, (ssmlError) => {
@@ -243,6 +264,24 @@ export class Service {
     console.info(`转换完成：${requestId}`)
     console.info(`剩余 ${this.executorMap.size} 个任务`)
     return data
+  }
+
+  public async getAuthor() {
+    try {
+      this.httpRequestAuthor = new XMLHttpRequest()
+      this.httpRequestAuthor.open("POST", "https://eastus.api.cognitive.microsoft.com/sts/v1.0/issuetoken", false)
+      this.httpRequestAuthor.setRequestHeader("Ocp-Apim-Subscription-Key", "replace with your-subscript-key")
+      this.httpRequestAuthor.send()
+      if (this.httpRequestAuthor.status == 200) {
+        this.author = this.httpRequestAuthor.responseText;
+        this.httpRequestAuthor = null
+      }
+      else{
+        console.error("获取授权码失败")
+      }
+    } catch (error) {
+      console.error(error)
+    }
   }
 }
 
